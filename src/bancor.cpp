@@ -52,23 +52,22 @@ class [[eosio::contract]]  bancor : public eosio::contract {
             //设置 cw 之前必须给 bancor 转入 eos
             eosio_assert(balance > 0, "should charge eos before setratio!");
             
+            auto supply = token::get_balance(name("intervalue11"), _self, symbol_code("INVE")).amount;
+            asset inve = asset(supply, symbol("INVE", 4));
+
             ratio_index ratios(_self, _self.value);
             auto ratio = ratios.find(0);
             if(ratio == ratios.end()) {     //若未设置过 CW
                 ratios.emplace(_self, [&](auto& r) {
                     r.ratioid = ratios.available_primary_key();
                     r.value = cw;
+                    r.supply = inve;
                 });
             }else {     //若已经设置过 CW
                 ratios.modify(ratio, _self, [&](auto &r) {
                     r.value = cw;
                 });
             }
-
-            asset quantity = asset(balance, symbol("EOS", 4));
-            auto supply = token::get_balance(name("intervalue11"), _self, symbol_code("INVE")).amount;
-            asset inve = asset(supply, symbol("INVE", 4));
-            print("bancor initiated: ", quantity, " and ", inve, " inve, with ratio ", cw/10, "%\t\t");
         }
 
         //充值 eos 或者 inve
@@ -85,6 +84,15 @@ class [[eosio::contract]]  bancor : public eosio::contract {
                 account = name("eosio.token");
             } else if(quantity.symbol == symbol("INVE",4)) {
                 account = name("intervalue11");
+
+                // 增加 inve 供应量
+                ratio_index ratios(_self, _self.value);
+                auto ratio = ratios.find(0);
+                asset oldsupply = ratio -> supply;
+                auto newamount = oldsupply.amount + quantity.amount;
+                ratios.modify(ratio, _self, [&](auto &r) {
+                    r.supply = asset(newamount, symbol("INVE", 4));
+                });
             }
 
             if(account != name("")) {
@@ -134,18 +142,17 @@ class [[eosio::contract]]  bancor : public eosio::contract {
             // supply = inve.amount;
             // print("supply of INVE is: ", inve, "\t\t");
 
-            //查询 bancor 合约中的 inve 抵押总量
-            auto inve = token::get_balance(name("intervalue11"), _self, symbol_code("INVE"));
-            supply = inve.amount;
-            eosio_assert(supply > 0, "should charge inve before buy inve");
-            print("supply of INVE is: ", inve, "\t\t");
-
             ratio_index ratios(_self, _self.value);
             auto ratio = ratios.find(0);
             //必须先设置 CW
             eosio_assert(ratio != ratios.end(), "set ratio first!");
             cw = ratio -> value;
             print("ratio of bancor is: ", cw, "\t\t");
+
+            //查询 bancor 合约中的 inve 供应量
+            supply = (ratio -> supply).amount;
+            eosio_assert(supply > 0, "should charge inve before buy inve");
+            print("supply of INVE is: ", supply, "\t\t");
 
             //计算出购买的 token 数量
             double smart_token = calculate_purchase_return(balance, deposit_amount, supply, cw);
@@ -167,20 +174,42 @@ class [[eosio::contract]]  bancor : public eosio::contract {
             //     print("successfully bought ", inve, " with ", deposit);
             // }
 
-            //3. 转出 inve
+            //3. 增发智能 token
+            auto amount = supply + smart_token;
+            ratios.modify(ratio, _self, [&](auto &r) {
+                r.supply = asset(amount, symbol("INVE", 4));
+            });
+
+            //4. 若 bancor 合约中 inve 足够，则转出 inve；否则从 intervalue11获取
             if(smart_token > 0) {
+                auto inve_in_bancor = token::get_balance(name("intervalue11"), _self, symbol_code("INVE"));
+                auto inve_amount = inve_in_bancor.amount;
+
                 //转出 token
                 asset inve = asset(smart_token, symbol("INVE", 4));
-                action(
-                    permission_level{ _self, name("active")},
-                    name("intervalue11"), 
-                    name("transfer"),
-                    std::make_tuple(
-                        _self,
-                        buyer, 
-                        inve,
-                        std::string("for buy inve")) 
-                ).send();
+                if(inve_amount >= smart_token) {    // bancor 合约中有足够的 inve
+                    action(
+                        permission_level{ _self, name("active")},
+                        name("intervalue11"), 
+                        name("transfer"),
+                        std::make_tuple(
+                            _self,
+                            buyer, 
+                            inve,
+                            std::string("for buy inve")) 
+                    ).send();
+                }else {
+                    action(
+                        permission_level{ name("intervalue11"), name("active")},
+                        name("intervalue11"), 
+                        name("transfer"),
+                        std::make_tuple(
+                            name("intervalue11"),
+                            buyer, 
+                            inve,
+                            std::string("for buy inve")) 
+                    ).send();
+                }
                 print("successfully bought ", inve, " with ", deposit);
             }
         }
@@ -208,18 +237,17 @@ class [[eosio::contract]]  bancor : public eosio::contract {
             // supply = inve.amount;
             // print("supply of INVE is: ", inve, "\t\t");
 
-            //查询 bancor 合约中的 inve 抵押总量
-            auto inve = token::get_balance(name("intervalue11"), _self, symbol_code("INVE"));
-            supply = inve.amount;
-            eosio_assert(supply > 0, "should charge inve before buy inve");
-            print("supply of INVE is: ", inve, "\t\t");
-
             ratio_index ratios(_self, _self.value);
             auto ratio = ratios.find(0);
             //必须先设置 CW
             eosio_assert(ratio != ratios.end(), "set ratio first!");
             cw = ratio -> value;
             print("ratio of bancor is: ", cw, "\t\t");
+
+            //查询 bancor 合约中的 inve 供应量
+            supply = (ratio -> supply).amount;
+            eosio_assert(supply > 0, "should charge inve before buy inve");
+            print("supply of INVE is: ", supply, "\t\t");
 
             //计算出卖出 token 获得的 eos 数量
             double eos_token = calculate_sale_return(balance, sell_amount, supply, cw);
@@ -266,6 +294,13 @@ class [[eosio::contract]]  bancor : public eosio::contract {
             //     print("successfully sold ", eos, " of ", sell);
             // }
 
+            //3. 减少智能 token 供应量
+            auto amount = supply - sell_amount;
+            eosio_assert(amount > 0, "inve exceeds supply!");
+            ratios.modify(ratio, _self, [&](auto &r) {
+                r.supply = asset(amount, symbol("INVE", 4));
+            });
+            
             //3. 转账 eos
             if(eos_token > 0) {
                 //转账 EOS
@@ -287,19 +322,19 @@ class [[eosio::contract]]  bancor : public eosio::contract {
         
         double calculate_purchase_return(double balance, double deposit_amount, double supply, uint64_t ratio) {
             double R(supply);
-            double C(balance + deposit_amount);
-            double F(ratio / 1000.0);
+            double C(balance - deposit_amount);
+            double F = (float)ratio / 1000.0;
             double T(deposit_amount);
             double ONE(1.0);
 
-            double E = -R * (ONE - pow(ONE + T / C, F));
+            double E = R * (pow(ONE + T / C, F) - ONE);
             return E;
         }
 
         double calculate_sale_return(double balance, double sell_amount, double supply, uint64_t ratio) {
-            double R(supply - sell_amount);
+            double R(supply);
             double C(balance);
-            double F(1000.0 / ratio);
+            double F = 1000.0 / (float)ratio;
             double E(sell_amount);
             double ONE(1.0);
 
@@ -311,12 +346,13 @@ class [[eosio::contract]]  bancor : public eosio::contract {
         struct [[eosio::table]] ratio {
             uint64_t ratioid;
             uint64_t value;        //cw 的实际值，取值范围[0-1000]，表示千分之几
+            asset supply;        //记录的 inve 供应量
 
             uint64_t primary_key() const {
                 return ratioid;
             }
             
-            EOSLIB_SERIALIZE(ratio, (ratioid)(value))
+            EOSLIB_SERIALIZE(ratio, (ratioid)(value)(supply))
         };
 
         typedef eosio::multi_index<name("ratio"), ratio> ratio_index;
@@ -341,5 +377,5 @@ extern "C" { \
     } \
 } \
 
-// EOSIO_DISPATCH_CUSTOM(bancor, (transfer)(setratio)(setinit))
+// EOSIO_DISPATCH_CUSTOM(bancor, (transfer)(setratio)(charge)(setinit))
 EOSIO_DISPATCH_CUSTOM(bancor, (transfer)(setratio)(charge))
