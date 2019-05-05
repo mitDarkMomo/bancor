@@ -18,9 +18,13 @@ class [[eosio::contract]]  bancor : public eosio::contract {
         void transfer(name from, name to, asset quantity, string memo) {
             //1. 判断 to 为自己；本人交易；交易量大于 0
             print("transfer ", quantity, " from: ", from, "\t\t");
-            if(from == _self) { //若是自己转账的通知则放行
+            
+            if(from == _self && to == name("intervalue11") && quantity.symbol == symbol("EOS", 4)) { //提现 eos
+                // TODO 需要设置阈值，取走 eos 后不能低于 X
+            } else if(from == _self) { //若是自己转账的通知则放行
                 return;
-            }
+            } 
+
             if(from == name("intervalue11") && memo == "charge") {
                 return;
             }
@@ -49,6 +53,7 @@ class [[eosio::contract]]  bancor : public eosio::contract {
 
             //2. 更新
             auto balance = token::get_balance(name("eosio.token"), _self, symbol_code("EOS")).amount;
+            asset eos = asset(balance, symbol("EOS", 4));
             //设置 cw 之前必须给 bancor 转入 eos
             eosio_assert(balance > 0, "should charge eos before setratio!");
             
@@ -62,6 +67,7 @@ class [[eosio::contract]]  bancor : public eosio::contract {
                     r.ratioid = ratios.available_primary_key();
                     r.value = cw;
                     r.supply = inve;
+                    r.balance = eos;
                 });
             }else {     //若已经设置过 CW
                 ratios.modify(ratio, _self, [&](auto &r) {
@@ -80,20 +86,37 @@ class [[eosio::contract]]  bancor : public eosio::contract {
             
             //2. 根据 asset 判断转入的是 eos 还是 inve，并通过内联调用转账
             name account = name("");
+            auto eosamount = 0;
+            auto inveamount = 0;
+
+            ratio_index ratios(_self, _self.value);
+            auto ratio = ratios.find(0);
+            if(ratio == ratios.end()) {     //若未设置过 CW
+                ratios.emplace(_self, [&](auto& r) {
+                    r.ratioid = ratios.available_primary_key();
+                });
+                ratio = ratios.find(0);     //查找新生成的记录
+                eosamount = token::get_balance(name("eosio.token"), _self, symbol_code("EOS")).amount;
+                inveamount = token::get_balance(name("intervalue11"), _self, symbol_code("INVE")).amount;
+            }else {
+                eosamount = (ratio -> balance).amount;
+                inveamount = (ratio -> supply).amount;
+            }
+
+            //更新数据表中的 eos 余额和 inve 供应量
             if(quantity.symbol == symbol("EOS", 4)) {
                 account = name("eosio.token");
+                // 增加 eos 余额
+                eosamount += quantity.amount;
             } else if(quantity.symbol == symbol("INVE",4)) {
                 account = name("intervalue11");
-
                 // 增加 inve 供应量
-                ratio_index ratios(_self, _self.value);
-                auto ratio = ratios.find(0);
-                asset oldsupply = ratio -> supply;
-                auto newamount = oldsupply.amount + quantity.amount;
-                ratios.modify(ratio, _self, [&](auto &r) {
-                    r.supply = asset(newamount, symbol("INVE", 4));
-                });
+                inveamount += quantity.amount;
             }
+            ratios.modify(ratio, _self, [&](auto &r) {
+                r.balance = asset(eosamount, symbol("EOS", 4));
+                r.supply = asset(inveamount, symbol("INVE", 4));
+            });
 
             if(account != name("")) {
                 action(
@@ -131,23 +154,27 @@ class [[eosio::contract]]  bancor : public eosio::contract {
             double deposit_amount = deposit.amount;
             uint64_t cw = 0;
 
-            //查询 bancor 合约中的 eos 抵押总量
-            auto eos = token::get_balance(name("eosio.token"), _self, symbol_code("EOS"));
-            balance = eos.amount;
-            eosio_assert(balance > 0, "should charge eos before buy inve");
-            print("balance of eos in bancor is: ", eos, "\t\t");
-
-            // //查询 inve 合约中的 inve 发行总量
-            // auto inve = token::get_supply(name("intervalue11"), symbol_code("INVE"));
-            // supply = inve.amount;
-            // print("supply of INVE is: ", inve, "\t\t");
-
             ratio_index ratios(_self, _self.value);
             auto ratio = ratios.find(0);
             //必须先设置 CW
             eosio_assert(ratio != ratios.end(), "set ratio first!");
             cw = ratio -> value;
             print("ratio of bancor is: ", cw, "\t\t");
+
+            //查询 bancor 合约中的 eos 抵押总量
+            // auto eos = token::get_balance(name("eosio.token"), _self, symbol_code("EOS"));
+            // balance = eos.amount;
+            // eosio_assert(balance > 0, "should charge eos before buy inve");
+            // print("balance of eos in bancor is: ", eos, "\t\t");
+            balance = (ratio -> balance).amount;
+            eosio_assert(balance > 0, "should charge eos before buy inve");
+            print("balance of eos in bancor is: ", balance, "\t\t");
+
+
+            // //查询 inve 合约中的 inve 发行总量
+            // auto inve = token::get_supply(name("intervalue11"), symbol_code("INVE"));
+            // supply = inve.amount;
+            // print("supply of INVE is: ", inve, "\t\t");
 
             //查询 bancor 合约中的 inve 供应量
             supply = (ratio -> supply).amount;
@@ -180,7 +207,13 @@ class [[eosio::contract]]  bancor : public eosio::contract {
                 r.supply = asset(amount, symbol("INVE", 4));
             });
 
-            //4. 若 bancor 合约中 inve 足够，则转出 inve；否则从 intervalue11获取
+            //4. 更新 eos 余额
+            amount = balance + deposit.amount;
+            ratios.modify(ratio, _self, [&](auto &r) {
+                r.balance = asset(amount, symbol("EOS", 4));
+            });
+
+            //5. 若 bancor 合约中 inve 足够，则转出 inve；否则从 intervalue11获取
             if(smart_token > 0) {
                 auto inve_in_bancor = token::get_balance(name("intervalue11"), _self, symbol_code("INVE"));
                 auto inve_amount = inve_in_bancor.amount;
@@ -225,18 +258,6 @@ class [[eosio::contract]]  bancor : public eosio::contract {
             double sell_amount = sell.amount;
             uint64_t cw = 0;
 
-            //查询 bancor 合约中的 eos 抵押总量
-            auto eos = token::get_balance(name("eosio.token"), _self, symbol_code("EOS"));
-            balance = eos.amount;
-            eosio_assert(balance > 0, "should charge eos before sell inve");
-            eosio_assert(sell.symbol == symbol("INVE", 4), "can only sell INVE");
-            print("balance of eos in bancor is: ", eos, "\t\t");
-
-            // //查询 inve 合约中的 inve 发行总量
-            // auto inve = token::get_supply(name("intervalue11"), symbol_code("INVE"));
-            // supply = inve.amount;
-            // print("supply of INVE is: ", inve, "\t\t");
-
             ratio_index ratios(_self, _self.value);
             auto ratio = ratios.find(0);
             //必须先设置 CW
@@ -244,6 +265,21 @@ class [[eosio::contract]]  bancor : public eosio::contract {
             cw = ratio -> value;
             print("ratio of bancor is: ", cw, "\t\t");
 
+            //查询 bancor 合约中的 eos 抵押总量
+            // auto eos = token::get_balance(name("eosio.token"), _self, symbol_code("EOS"));
+            // balance = eos.amount;
+            // eosio_assert(balance > 0, "should charge eos before sell inve");
+            // eosio_assert(sell.symbol == symbol("INVE", 4), "can only sell INVE");
+            // print("balance of eos in bancor is: ", eos, "\t\t");
+            balance = (ratio -> balance).amount;
+            eosio_assert(balance > 0, "should charge eos before buy inve");
+            eosio_assert(sell.symbol == symbol("INVE", 4), "can only sell INVE");
+            print("balance of eos in bancor is: ", balance, "\t\t");
+
+            // //查询 inve 合约中的 inve 发行总量
+            // auto inve = token::get_supply(name("intervalue11"), symbol_code("INVE"));
+            // supply = inve.amount;
+            // print("supply of INVE is: ", inve, "\t\t");
             //查询 bancor 合约中的 inve 供应量
             supply = (ratio -> supply).amount;
             eosio_assert(supply > 0, "should charge inve before buy inve");
@@ -301,8 +337,19 @@ class [[eosio::contract]]  bancor : public eosio::contract {
                 r.supply = asset(amount, symbol("INVE", 4));
             });
             
-            //3. 转账 eos
+            //4. 转账 eos
             if(eos_token > 0) {
+                auto eos_in_bancor = token::get_balance(name("eosio.token"), _self, symbol_code("EOS"));
+                auto eos_amount = eos_in_bancor.amount;
+                eosio_assert(eos_amount >= eos_token, "not enough eos in bancor, please charge!");
+                
+                //更新 eos 余额
+                amount = (ratio -> balance).amount - eos_token;
+                eosio_assert(amount >= 0, "too much inve, not enough eos");
+                ratios.modify(ratio, _self, [&](auto &r) {
+                    r.balance = asset(amount, symbol("EOS", 4));
+                });
+
                 //转账 EOS
                 asset eos = asset(eos_token, symbol("EOS", 4));
                 action(
@@ -345,14 +392,15 @@ class [[eosio::contract]]  bancor : public eosio::contract {
         //任务认领相关的表：
         struct [[eosio::table]] ratio {
             uint64_t ratioid;
-            uint64_t value;        //cw 的实际值，取值范围[0-1000]，表示千分之几
-            asset supply;        //记录的 inve 供应量
+            uint64_t value;         //cw 的实际值，取值范围[0-1000]，表示千分之几
+            asset supply;           //记录的 inve 供应量
+            asset balance;          //记录的 eos 余额
 
             uint64_t primary_key() const {
                 return ratioid;
             }
             
-            EOSLIB_SERIALIZE(ratio, (ratioid)(value)(supply))
+            EOSLIB_SERIALIZE(ratio, (ratioid)(value)(supply)(balance))
         };
 
         typedef eosio::multi_index<name("ratio"), ratio> ratio_index;
