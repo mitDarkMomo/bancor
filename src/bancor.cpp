@@ -21,6 +21,7 @@ class [[eosio::contract]]  bancor : public eosio::contract {
             
             if(from == _self && to == name("intervalue11") && quantity.symbol == symbol("EOS", 4)) { //提现 eos
                 // TODO 需要设置阈值，取走 eos 后不能低于 X
+                return;
             } else if(from == _self) { //若是自己转账的通知则放行
                 return;
             } 
@@ -220,7 +221,7 @@ class [[eosio::contract]]  bancor : public eosio::contract {
 
                 //转出 token
                 asset inve = asset(smart_token, symbol("INVE", 4));
-                if(inve_amount >= smart_token) {    // bancor 合约中有足够的 inve
+                if(inve_amount > smart_token) {    // bancor 合约中有足够的 inve
                     action(
                         permission_level{ _self, name("active")},
                         name("intervalue11"), 
@@ -369,7 +370,8 @@ class [[eosio::contract]]  bancor : public eosio::contract {
         
         double calculate_purchase_return(double balance, double deposit_amount, double supply, uint64_t ratio) {
             double R(supply);
-            double C(balance - deposit_amount);
+            double C(balance);
+            // double C(balance - deposit_amount);
             double F = (float)ratio / 1000.0;
             double T(deposit_amount);
             double ONE(1.0);
